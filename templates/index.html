@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audio Chat with Zeta</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 900px; margin: 20px auto; }
+    .controls { margin-bottom: 12px; }
+    .btn { padding: 8px 12px; margin-right: 8px; }
+    .message { border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; }
+    .user { background: #e6f7ff; text-align: left; }
+    .bot { background: #fff7e6; text-align: left; }
+    .meta { font-size: 0.85em; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Audio Chat with Zeta</h1>
+  <p>Record audio and send it to the server. Conversation is persistent (SQLite). The bot output area is present for you to populate.</p>
+
+  <div class="controls">
+    <button id="startBtn" class="btn">Start Recording</button>
+    <button id="stopBtn" class="btn" disabled>Stop Recording</button>
+    <button id="refreshBtn" class="btn">Refresh Messages</button>
+    <button class="btn" onclick="triggerWebhook()">Run Workflow</button>
+    <span id="status"></span>
+  </div>
+
+  <div>
+    <h2>Conversation</h2>
+    <div id="messages"></div>
+  </div>
+
+  <div>
+    <h2>Zeta's Response</h2>
+    <div id="botArea" class="message bot">Zeta's responses will appear here when you add them via the API.</div>
+  </div>
+
+<script>
+let mediaRecorder;
+let chunks = [];
+let stream;
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const refreshBtn = document.getElementById('refreshBtn');
+const statusEl = document.getElementById('status');
+
+function triggerWebhook() {
+  fetch('https://your-n8n-instance.com/rest/workflows/<workflowId>/run', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer <your_api_key>' // if authentication is enabled
+    },
+    body: JSON.stringify({})
+  })
+  .then(response => response.json())
+  .then(data => console.log(data))
+  .catch(error => console.error(error));
+}
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  statusEl.textContent = 'recording...';
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    chunks = [];
+    mediaRecorder.ondataavailable = e => chunks.push(e.data);
+    mediaRecorder.onstop = onStopRecord;
+    mediaRecorder.start();
+  } catch (err) {
+    alert('Failed to access microphone: ' + err.message);
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    statusEl.textContent = '';
+  }
+});
+
+stopBtn.addEventListener('click', () => {
+  stopBtn.disabled = true;
+  startBtn.disabled = false;
+  statusEl.textContent = 'stopping...';
+  mediaRecorder.stop();
+  stream.getTracks().forEach(t => t.stop());
+});
+
+async function onStopRecord() {
+  statusEl.textContent = 'uploading...';
+  const blob = new Blob(chunks, { type: 'audio/webm' });
+  const fd = new FormData();
+  fd.append('audio', blob, 'recording.webm');
+  try {
+    const res = await fetch('/api/upload_audio', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.success) {
+      statusEl.textContent = 'uploaded';
+    } else {
+      statusEl.textContent = 'upload failed';
+    }
+  } catch (err) {
+    statusEl.textContent = 'upload error';
+    console.error(err);
+  }
+  await loadMessages();
+  setTimeout(()=> statusEl.textContent = '', 1500);
+}
+
+refreshBtn.addEventListener('click', loadMessages);
+
+async function loadMessages() {
+  try {
+    const res = await fetch('/api/messages');
+    const msgs = await res.json();
+    const el = document.getElementById('messages');
+    el.innerHTML = '';
+    msgs.forEach(m => {
+      const div = document.createElement('div');
+      div.className = 'message ' + (m.role === 'user' ? 'user' : 'bot');
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = `${m.role} — ${new Date(m.created_at).toLocaleString()}`;
+      
+      // ✅ Allow delete for both user and bot messages
+      const delBtn = document.createElement('button');
+      delBtn.textContent = 'Delete';
+      delBtn.style.marginLeft = '8px';
+      delBtn.onclick = async () => {
+        if (!confirm('Delete this message?')) return;
+        try {
+          const resp = await fetch('/api/messages/' + m.id, { method: 'DELETE' });
+          const j = await resp.json();
+          if (j.success) {
+            await loadMessages();
+          } else {
+            alert('Delete failed');
+          }
+        } catch (err) {
+          console.error('Delete error', err);
+          alert('Delete error');
+        }
+      };
+      meta.appendChild(delBtn);
+
+      div.appendChild(meta);
+
+      if (m.text) {
+        const p = document.createElement('div');
+        p.textContent = m.text;
+        div.appendChild(p);
+      }
+      if (m.audio_filename) {
+        const audio = document.createElement('audio');
+        audio.controls = true;
+        audio.src = '/uploads/' + encodeURIComponent(m.audio_filename);
+        div.appendChild(audio);
+      }
+      el.appendChild(div);
+    });
+  } catch (err) {
+    console.error('Failed to load messages', err);
+  }
+}
+
+loadMessages();
+setInterval(loadMessages, 5000);
+</script>
+</body>
+</html>
